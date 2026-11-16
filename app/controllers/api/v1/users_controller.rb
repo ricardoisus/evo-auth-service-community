@@ -4,16 +4,17 @@ class Api::V1::UsersController < Api::BaseController
   # Authorization first, or the lookup leaks an id's existence to a caller
   # without users.read.
   before_action :check_authorization
-  before_action :fetch_user, except: [:create, :index, :bulk_create]
+  before_action :fetch_user, except: [:create, :index, :bulk_create, :invitation_capabilities]
 
   def index
     @users = Users::FilterService.new(params[:filters], params[:q], params[:sort], params[:order],
                                       relation: users_index_scope).resolve
 
     apply_pagination
+    @users = @users.includes(:user_invitation_deliveries) if UserInvitations.administrator?(current_user)
 
     paginated_response(
-      data: @users.map { |user| UserSerializer.directory(user) },
+      data: @users.map { |user| serialize_directory_user(user) },
       collection: @users,
       message: 'Users retrieved successfully'
     )
@@ -35,10 +36,14 @@ class Api::V1::UsersController < Api::BaseController
 
     @user = builder.perform
     success_response(
-      data: { user: UserSerializer.for_reader(@user, current_user) },
+      data: { user: serialize_user(@user) },
       message: 'User created successfully',
       status: :created
     )
+  rescue UserInvitations::Error => error
+    invitation_error(error)
+  rescue ActiveRecord::RecordNotUnique
+    error_response('USER_NOT_CREATED', 'Não foi possível criar este usuário.', status: :unprocessable_entity)
   rescue ActiveRecord::RecordInvalid => e
     error_response(
       ApiErrorCodes::VALIDATION_ERROR,
@@ -58,7 +63,7 @@ class Api::V1::UsersController < Api::BaseController
     end
 
     success_response(
-      data: { user: UserSerializer.for_reader(@user, current_user) },
+      data: { user: serialize_user(@user) },
       message: 'User updated successfully'
     )
   rescue StandardError => e
@@ -81,25 +86,35 @@ class Api::V1::UsersController < Api::BaseController
 
   def bulk_create
     emails = params[:emails]
-
-    emails.each do |email|
-      builder = AgentBuilder.new(
-        email: email,
-        name: email.split('@').first,
-        role: (params[:role] || :agent).to_sym,
-        inviter: current_user
-      )
+    unless emails.is_a?(Array) && emails.any? && emails.size <= 50 && emails.all? { |email| email.is_a?(String) }
+      return error_response('VALIDATION_ERROR', 'Informe até 50 endereços.', status: :unprocessable_entity)
+    end
+    return error_response('INVITATIONS_DISABLED', 'Convites indisponíveis.', status: :service_unavailable) unless UserInvitations.enabled?
+    invited, failed = [], []
+    emails.map { |email| email.strip.downcase }.uniq.each do |email|
       begin
-        builder.perform
-      rescue ActiveRecord::RecordInvalid => e
-        Rails.logger.info "[User#bulk_create] ignoring email #{email}, errors: #{e.record.errors}"
+        user = AgentBuilder.new(email: email, name: email.split('@').first,
+                                role: params[:role].presence || 'agent', inviter: current_user).perform
+        invited << serialize_user(user).slice(:id, :email, :name, :invitation_status, :invitation_delivery_status)
+      rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotUnique, UserInvitations::Error
+        failed << { email: email, code: 'USER_NOT_CREATED', error: 'Não foi possível criar este usuário. Revise os dados ou a lista de usuários.' }
       end
     end
+    success_response(data: { count: invited.size, invited_users: invited, failed_invitations: failed },
+                     message: 'Convites solicitados.', status: invited.empty? ? :unprocessable_entity : :ok)
+  end
 
-    success_response(
-      data: { count: emails.count },
-      message: 'Users bulk created successfully'
-    )
+  def resend_invite
+    delivery = UserInvitations.reserve!(@user, actor: current_user)
+    success_response(data: { user_id: @user.id, invitation_status: 'pending', delivery_status: 'queued',
+                            request_id: delivery.id, next_resend_at: UserInvitations.next_at(@user)&.iso8601 },
+                     message: 'Reenvio solicitado.', status: :accepted)
+  rescue UserInvitations::Error => error
+    invitation_error(error)
+  end
+
+  def invitation_capabilities
+    success_response(data: { user_invitations_enabled: UserInvitations.enabled? && UserInvitations.administrator?(current_user) })
   end
 
   def check_permission
@@ -139,6 +154,10 @@ class Api::V1::UsersController < Api::BaseController
   # of users.reset_password via administrative_action?. Revoking the target's
   # sessions is deliberate — a stolen one must not outlive the reset.
   def set_password
+    @user.with_lock { set_password_under_lock }
+  end
+
+  def set_password_under_lock
     # Target guards run BEFORE input validation: a caller who may not touch this
     # user gets 403, not a 422 teaching it the password policy first.
     if @user.id == current_user.id
@@ -201,6 +220,24 @@ class Api::V1::UsersController < Api::BaseController
     !current_user.roles.exists?(key: 'super_admin')
   end
 
+  def serialize_directory_user(user)
+    data = UserSerializer.directory(user)
+    data.merge!(UserInvitations.data(user)) if UserInvitations.administrator?(current_user)
+    data
+  end
+
+  def serialize_user(user)
+    UserSerializer.for_reader(user, current_user)
+  end
+
+  def invitation_error(error)
+    if error.next_at
+      response.set_header('Retry-After', [(error.next_at - Time.current).ceil, 1].max.to_s)
+    end
+    error_response(error.code, 'Não foi possível solicitar o convite.',
+                   details: { next_resend_at: error.next_at&.iso8601 }, status: error.status)
+  end
+
   def update_user_role(role_key)
     system_role = Role.find_by(key: role_key)
     raise ActiveRecord::RecordNotFound, "Role '#{role_key}' not found" unless system_role
@@ -221,6 +258,15 @@ class Api::V1::UsersController < Api::BaseController
   end
 
   def check_authorization
+    if %w[resend_invite create bulk_create].include?(action_name)
+      keys = action_name == 'resend_invite' ? %w[users.manage users.update] : %w[users.manage users.create]
+      keys << 'users.bulk_operations' if action_name == 'bulk_create'
+      unless Current.service_authenticated != true && current_user && keys.all? { |key| current_user.has_permission?(key) }
+        return respond_forbidden('Sem permissão para administrar convites.')
+      end
+      return true
+    end
+    return true if action_name == 'invitation_capabilities' && current_user
     # IMPORTANT: read actions stay gated on `users.read` (OPERATIONAL), not
     # `users.manage` (ADMINISTRATIVE). The Conversations screen needs to load
     # the attendant list/filters via GET /api/v1/users, so any role with
@@ -301,7 +347,7 @@ class Api::V1::UsersController < Api::BaseController
 
   # A lookup by id needs neither the ordering nor the includes of the #index scope.
   def fetch_user
-    @user = User.find(params[:id])
+    @user = users_index_scope.find(params[:id])
   end
 
   def allowed_user_params

@@ -58,6 +58,10 @@ class Api::V1::ProfilesController < Api::BaseController
   end
 
   def update_password
+    current_user.with_lock { update_password_under_lock }
+  end
+
+  def update_password_under_lock
     unless params[:current_password].present? && params[:new_password].present?
       error_response('VALIDATION_ERROR', 'Current password and new password are required', status: :unprocessable_entity)
       return
@@ -65,6 +69,7 @@ class Api::V1::ProfilesController < Api::BaseController
 
     if current_user.valid_password?(params[:current_password])
       if current_user.update(password: params[:new_password])
+        PasswordRecovery.revoke!(current_user)
         success_response(data: {}, message: 'Password updated successfully')
       else
         render_unprocessable_entity(current_user.errors)

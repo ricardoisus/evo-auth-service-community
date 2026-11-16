@@ -1,0 +1,10 @@
+<div style="background:#F2EFE8;padding:32px;font-family:Arial,sans-serif;color:#0E0E0E;color-scheme:light">
+  <div style="max-width:560px;margin:auto;background:#fff;padding:32px;border-top:4px solid #B45417">
+    <p>Olá, <%= @user.name %>.</p>
+    <p>Você recebeu um convite para acessar o Evo CRM da Vetorial.</p>
+    <p>Defina sua senha para começar. Este link é válido por 6 horas e pode ser usado uma única vez.</p>
+    <p style="margin:32px 0"><a href="<%= @reset_url %>" style="background:#B45417;color:#fff;padding:14px 20px;text-decoration:none">Definir minha senha</a></p>
+    <p>Se você não esperava este convite, ignore este e-mail. Nenhuma ação é necessária.</p>
+    <p>Agência Vetorial</p>
+  </div>
+</div>

@@ -126,6 +126,7 @@ Rails.application.routes.draw do
       resource :setup_survey, only: [:show, :create], controller: 'setup_survey'
 
       # User management
+      get 'users/invitation_capabilities', to: 'users#invitation_capabilities'
       resources :users, only: [:index, :create, :update, :destroy] do
         collection do
           post :bulk_create
@@ -134,6 +135,7 @@ Rails.application.routes.draw do
           get :role
           post :check_permission
           # CRM-210: admin-driven, unlike the token-based auth#reset_password.
+          post :resend_invite
           post :set_password
         end
       end

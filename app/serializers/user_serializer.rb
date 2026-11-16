@@ -64,7 +64,9 @@ module UserSerializer
   def for_reader(user, reader)
     return nil unless user
 
-    reader && user.id == reader.id ? full(user) : directory(user)
+    data = reader && user.id == reader.id ? full(user) : directory(user)
+    data.merge!(UserInvitations.data(user)) if UserInvitations.administrator?(reader)
+    data
   end
 
   # Basic user serialization (for lists, references)

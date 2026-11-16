@@ -1,56 +1,39 @@
-# frozen_string_literal: true
-
 require 'rails_helper'
-
 RSpec.describe AgentBuilder do
-  let!(:agent_role) do
-    Role.find_by(key: 'agent') || Role.create!(key: 'agent', name: 'Agent', type: 'user')
+  before do
+    @flag = ENV['USER_INVITATIONS_ENABLED']
+    ENV['USER_INVITATIONS_ENABLED'] = 'true'
+    allow(InvitationRateLimiter).to receive(:consume!).and_return(true)
+    Role.find_or_create_by!(key: 'agent') { |r| r.name = 'Agent'; r.type = 'user' }
   end
-  let(:inviter) do
-    User.create!(email: 'admin@example.com', name: 'Admin', password: 'Adm1n!Pass')
+  after { ENV['USER_INVITATIONS_ENABLED'] = @flag }
+  it 'creates confirmed pending user and durable outbox in one transaction' do
+    user = described_class.new(email: 'new@example.com', inviter: nil).perform
+    expect(user.confirmed?).to be true
+    expect(user.invited_at).to be_present
+    expect(user.user_invitation_deliveries.count).to eq(1)
   end
-
-  describe '#perform' do
-    it 'creates a new user with confirmed_at already set so login works without email confirmation' do
-      user = described_class.new(email: 'newagent@example.com', inviter: inviter).perform
-
-      expect(user).to be_persisted
-      expect(user.confirmed_at).to be_present
-    end
-
-    it 'assigns the default agent role when no role is passed' do
-      user = described_class.new(email: 'agent1@example.com', inviter: inviter).perform
-
-      expect(user.roles.map(&:key)).to include('agent')
-    end
-
-    context 'when the requested role key does not exist' do
-      it 'falls back to the agent role instead of raising 500' do
-        user = described_class.new(email: 'fallback@example.com', role: :nonexistent, inviter: inviter).perform
-
-        expect(user.roles.map(&:key)).to include('agent')
-      end
-    end
-
-    context 'when neither the requested role nor the agent fallback exists' do
-      before do
-        allow(Role).to receive(:find_by).and_return(nil)
-        allow(Role).to receive(:find_by!).and_raise(ActiveRecord::RecordNotFound)
-      end
-
-      it 'raises RecordNotFound with a clear signal' do
-        expect do
-          described_class.new(email: 'broken@example.com', role: :nonexistent, inviter: inviter).perform
-        end.to raise_error(ActiveRecord::RecordNotFound)
-      end
-    end
-
-    it 'returns the existing user without recreating when email already registered' do
-      existing = User.create!(email: 'exists@example.com', name: 'Exists', password: 'Ex1st!Pass')
-
-      user = described_class.new(email: 'exists@example.com', inviter: inviter).perform
-
-      expect(user.id).to eq(existing.id)
-    end
+  it 'keeps explicit-password creation without invitation when flag is off' do
+    ENV['USER_INVITATIONS_ENABLED'] = 'false'
+    user = described_class.new(email: 'new@example.com', password: 'Strong123!', inviter: nil).perform
+    expect(user.valid_password?('Strong123!')).to be true
+    expect(user.invited_at).to be_nil
+    expect(user.user_invitation_deliveries.count).to eq(0)
+  end
+  it 'rejects existing address without mutating password or role' do
+    user = User.create!(name: 'N4 Synthetic', email: 'exists@example.com', password: 'Strong123!')
+    expect { described_class.new(email: user.email, inviter: nil).perform }.to raise_error(UserInvitations::Error, 'USER_NOT_CREATED')
+    expect(user.reload.valid_password?('Strong123!')).to be true
+    expect(user.roles.count).to eq(0)
+  end
+  it 'rejects unknown role and rolls back user and invitation' do
+    expect { described_class.new(email: 'new@example.com', role: 'missing', inviter: nil).perform }.to raise_error(UserInvitations::Error, 'USER_NOT_CREATED')
+    expect(User.from_email('new@example.com')).to be_nil
+  end
+  it 'rolls back creation when limiter is unavailable' do
+    allow(InvitationRateLimiter).to receive(:consume!).and_raise(UserInvitations::Error.new('INVITE_QUEUE_UNAVAILABLE', 503))
+    actor = User.create!(name: 'N4 Synthetic', email: 'actor@example.com', password: 'Strong123!')
+    expect { described_class.new(email: 'new@example.com', inviter: actor).perform }.to raise_error(UserInvitations::Error)
+    expect(User.from_email('new@example.com')).to be_nil
   end
 end
