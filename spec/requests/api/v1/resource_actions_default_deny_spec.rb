@@ -37,6 +37,8 @@ RSpec.describe 'ResourceActionsController unmapped-action authorization', type: 
     Api::V1::ResourceActionsController.send(:remove_method, :unmapped_read_probe)
   end
 
+  before { load Rails.root.join('db/seeds/rbac.rb') }
+
   let(:password) { 'Test123!@' }
   let(:admin_role) { Role.find_by!(key: 'super_admin') }
 

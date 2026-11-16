@@ -8,6 +8,7 @@ class AgentBuilder
     ActiveRecord::Base.transaction do
       @user = find_or_create_user
       assign_role
+      UserInvitations.reserve!(@user, actor: inviter) if password.blank?
     end
     @user
   end
@@ -16,17 +17,23 @@ class AgentBuilder
 
   def find_or_create_user
     user = User.from_email(email)
-    return user if user
+    raise UserInvitations::Error.new('USER_NOT_CREATED', 422) if user
+    raise UserInvitations::Error.new('INVITATIONS_DISABLED', 503) if password.blank? && !UserInvitations.enabled?
 
     generated_password = password.presence || "1!aA#{SecureRandom.alphanumeric(12)}"
-    user = User.new(email: email, name: name, password: generated_password)
+    user = User.new(email: email, name: name, password: generated_password, invited_at: password.blank? ? Time.current : nil)
     user.skip_confirmation!
     user.save!
     user
   end
 
   def assign_role
-    system_role = Role.find_by(key: role) || Role.find_by!(key: :agent)
+    system_role = Role.find_by(key: role)
+    raise UserInvitations::Error.new('USER_NOT_CREATED', 422) unless system_role
+    if inviter && !inviter.roles.exists?(key: 'super_admin')
+      allowed = system_role.permission_keys.all? { |key| inviter.has_permission?(key) }
+      raise UserInvitations::Error.new('USER_NOT_CREATED', 422) if system_role.key == 'super_admin' || !allowed
+    end
 
     existing = @user.user_roles.joins(:role).where(roles: { system: false })
     existing.destroy_all if existing.exists?

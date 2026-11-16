@@ -49,7 +49,9 @@ RSpec.describe 'Users directory serialization (CRM-535)', type: :request do
       users = body['data']
       expect(users.map { |u| u['id'] }).to include(other_user.id, admin_user.id)
       users.each do |user|
-        expect(user.keys).to match_array(directory_keys)
+        invitation_keys = %w[invitation_status invitation_sent_at invitation_last_requested_at invitation_delivery_status invitation_error_code invitation_request_id next_resend_at can_resend_invite]
+        expected_keys = directory_keys + (UserInvitations.administrator?(admin_user) ? invitation_keys : [])
+        expect(user.keys).to match_array(expected_keys)
       end
     end
   end

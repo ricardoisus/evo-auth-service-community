@@ -163,59 +163,8 @@ class Api::V1::AuthController < Api::BaseController
   end
 
   def forgot_password
-    email = params[:email]&.strip&.downcase
-    
-    return error_response('VALIDATION_ERROR', 'Email is required', status: :unprocessable_entity) if email.blank?
-    
-    user = User.from_email(email)
-    
-    if user
-      begin
-        raw_token, encrypted_token = Devise.token_generator.generate(User, :reset_password_token)
-        user.reset_password_token = encrypted_token
-        user.reset_password_sent_at = Time.current
-        
-        if user.save(validate: false)
-          # Tentar enviar email e capturar erros
-          user.send_reset_password_instructions(
-            email: email,
-            provider: 'email',
-            redirect_url: params[:redirect_url] || "#{ENV.fetch('FRONTEND_URL', 'http://localhost:5173')}/auth/reset-password",
-            client_config: params[:config_name],
-            token: raw_token
-          )
-          
-          Rails.logger.info "Password reset email sent successfully to #{email}"
-          
-          success_response(
-            data: { success: true },
-            message: 'Password reset instructions have been sent to your email'
-          )
-        else
-          Rails.logger.error "Failed to save reset token for user #{user.id}"
-          error_response('OPERATION_FAILED', 'Failed to process password reset request', status: :unprocessable_entity)
-        end
-      rescue StandardError => e
-        # Rollback: limpar token se envio falhou
-        user.update_columns(reset_password_token: nil, reset_password_sent_at: nil) if user.persisted?
-        
-        Rails.logger.error "Failed to send password reset email to #{email}: #{e.class} - #{e.message}"
-        Rails.logger.error e.backtrace.first(5).join("\n")
-        
-        error_response(
-          'EMAIL_DELIVERY_FAILED',
-          'Unable to send password reset email. Please contact support or try again later.',
-          status: :service_unavailable
-        )
-      end
-    else
-      Rails.logger.info "Password reset requested for non-existent email: #{email}"
-      
-      success_response(
-        data: { success: true },
-        message: 'If an account exists with this email, password reset instructions will be sent'
-      )
-    end
+    PasswordRecovery.request(params[:email], request.remote_ip)
+    success_response(data: {}, message: PasswordRecovery::MESSAGE, status: :accepted)
   end
 
   def verify_mfa
@@ -285,65 +234,12 @@ class Api::V1::AuthController < Api::BaseController
   end
 
   def reset_password
-    token = params[:reset_password_token]
-    password = params[:password]
-    password_confirmation = params[:password_confirmation]
-    
-    return error_response('VALIDATION_ERROR', 'Reset password token is required', status: :unprocessable_entity) if token.blank?
-    return error_response('VALIDATION_ERROR', 'Password is required', status: :unprocessable_entity) if password.blank?
-    return error_response('VALIDATION_ERROR', 'Password confirmation is required', status: :unprocessable_entity) if password_confirmation.blank?
-    
-    if password != password_confirmation
-      return error_response(
-        'VALIDATION_ERROR',
-        'Password confirmation does not match',
-        details: [{ field: 'password_confirmation', message: 'does not match password' }],
-        status: :unprocessable_entity
-      )
-    end
-    
-    user = User.with_reset_password_token(token)
-    
-    if user.blank?
-      return error_response(
-        'INVALID_TOKEN',
-        'Invalid or expired reset password token',
-        details: [{ field: 'reset_password_token', message: 'is invalid or expired' }],
-        status: :unprocessable_entity
-      )
-    end
-    
-    if user.reset_password_period_valid?
-      user.password = password
-      user.password_confirmation = password_confirmation
-      user.reset_password_token = nil
-      user.reset_password_sent_at = nil
-      
-      if user.save
-        active_tokens = Doorkeeper::AccessToken.where(resource_owner_id: user.id, revoked_at: nil)
-        active_tokens.pluck(:token).each { |t| TokenValidationService.invalidate_cache_for_token(t) }
-        active_tokens.update_all(revoked_at: Time.current)
-        
-        success_response(
-          data: { success: true },
-          message: 'Your password has been reset successfully. Please log in with your new password.'
-        )
-      else
-        error_response(
-          'VALIDATION_ERROR',
-          user.errors.full_messages.join(', '),
-          details: validation_error_details(user),
-          status: :unprocessable_entity
-        )
-      end
-    else
-      error_response(
-        'EXPIRED_TOKEN',
-        'Reset password token has expired. Please request a new one',
-        details: [{ field: 'reset_password_token', message: 'has expired' }],
-        status: :unprocessable_entity
-      )
-    end
+    PasswordRecovery.consume!(params[:reset_password_token], params[:password], params[:password_confirmation])
+    success_response(data: { success: true }, message: 'Senha definida. Entre com seu e-mail e senha.')
+  rescue UserInvitations::Error => error
+    error_response(error.code, 'Este link é inválido ou expirou, ou a senha não atende aos requisitos.', status: error.status)
+  rescue ActiveRecord::RecordInvalid
+    error_response('VALIDATION_ERROR', 'A senha não atende aos requisitos.', status: :unprocessable_entity)
   end
 
   private

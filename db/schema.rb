@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.1].define(version: 2026_08_22_010001) do
+ActiveRecord::Schema[7.1].define(version: 2026_11_16_120001) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_stat_statements"
   enable_extension "pg_trgm"
@@ -182,6 +182,26 @@ ActiveRecord::Schema[7.1].define(version: 2026_08_22_010001) do
     t.index ["user_id"], name: "index_setup_survey_responses_on_user_id", unique: true
   end
 
+  create_table "user_invitation_deliveries", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
+    t.uuid "user_id", null: false
+    t.uuid "requested_by_id"
+    t.string "origin", default: "admin", null: false
+    t.string "status", default: "queued", null: false
+    t.string "error_code"
+    t.timestamptz "requested_at", null: false
+    t.timestamptz "started_at"
+    t.timestamptz "finished_at"
+    t.timestamptz "smtp_accepted_at"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["requested_by_id"], name: "index_user_invitation_deliveries_on_requested_by_id"
+    t.index ["status", "requested_at"], name: "index_user_invitation_deliveries_on_status_and_requested_at"
+    t.index ["user_id", "requested_at"], name: "index_user_invitation_deliveries_on_user_id_and_requested_at"
+    t.index ["user_id"], name: "index_user_invitation_deliveries_on_user_id"
+    t.index ["user_id"], name: "one_active_user_invitation", unique: true, where: "((status)::text = ANY ((ARRAY['queued'::character varying, 'sending'::character varying])::text[]))"
+    t.check_constraint "status::text = ANY (ARRAY['queued'::character varying, 'sending'::character varying, 'sent'::character varying, 'failed'::character varying, 'uncertain'::character varying, 'cancelled'::character varying]::text[])", name: "invitation_delivery_status"
+  end
+
   create_table "user_roles", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
     t.uuid "user_id", null: false
     t.uuid "role_id", null: false
@@ -246,6 +266,10 @@ ActiveRecord::Schema[7.1].define(version: 2026_08_22_010001) do
     t.integer "failed_mfa_attempts", default: 0
     t.datetime "created_at", default: -> { "now()" }, null: false
     t.datetime "updated_at", default: -> { "now()" }, null: false
+    t.timestamptz "invited_at"
+    t.timestamptz "invitation_accepted_at"
+    t.timestamptz "invitation_sent_at"
+    t.timestamptz "invitation_last_requested_at"
     t.index ["email"], name: "index_users_on_email"
     t.index ["email_otp_sent_at"], name: "index_users_on_email_otp_sent_at"
     t.index ["mfa_method"], name: "index_users_on_mfa_method"
@@ -263,6 +287,8 @@ ActiveRecord::Schema[7.1].define(version: 2026_08_22_010001) do
   add_foreign_key "oauth_access_tokens", "oauth_applications", column: "application_id"
   add_foreign_key "role_permissions_actions", "roles"
   add_foreign_key "setup_survey_responses", "users"
+  add_foreign_key "user_invitation_deliveries", "users", column: "requested_by_id", on_delete: :nullify
+  add_foreign_key "user_invitation_deliveries", "users", on_delete: :cascade
   add_foreign_key "user_roles", "roles"
   add_foreign_key "user_roles", "users"
   add_foreign_key "user_roles", "users", column: "granted_by_id"

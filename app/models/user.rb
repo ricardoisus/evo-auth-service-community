@@ -44,6 +44,21 @@
 #
 
 class User < ApplicationRecord
+  has_many :user_invitation_deliveries, dependent: :delete_all
+
+  # Password writes from profile/admin/Devise share the same row lock as resend.
+  around_update :serialize_invitation_password_change
+
+  def serialize_invitation_password_change
+    if will_save_change_to_encrypted_password?
+      self.class.where(id: id).lock(true).pluck(:id)
+      self.reset_password_token = nil
+      self.reset_password_sent_at = nil
+      self.invitation_accepted_at ||= Time.current if invited_at
+    end
+    yield
+  end
+
   include AccessTokenable
   include AvailabilityStatusable
   include PermissionVerifiable
@@ -53,6 +68,7 @@ class User < ApplicationRecord
   include SsoAuthenticatable
   include UserAttributeHelpers
   include TwoFactorAuthenticatable
+  prepend InvitationTokenAcceptance
   
   require "argon2"
   PASSWORD_SPECIAL_CHAR_REGEX = /[^A-Za-z0-9]/.freeze
